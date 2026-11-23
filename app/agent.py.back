@@ -1,0 +1,65 @@
+import os
+from typing import TypedDict
+
+from dotenv import load_dotenv
+from google import genai
+from langgraph.graph import StateGraph, START, END
+
+load_dotenv()
+
+API_KEY = os.getenv("GEMINI_API_KEY")
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+
+if not API_KEY:
+    raise RuntimeError("GEMINI_API_KEY belum dikonfigurasi")
+
+client = genai.Client(api_key=API_KEY)
+
+
+class AgentState(TypedDict):
+    history: list[dict[str, str]]
+    user_message: str
+    answer: str
+
+
+def generate_response(state: AgentState):
+    conversation = []
+
+    for message in state["history"][-10:]:
+        role = "User" if message["role"] == "user" else "Assistant"
+        conversation.append(f"{role}: {message['content']}")
+
+    conversation.append(f"User: {state['user_message']}")
+
+    response = client.models.generate_content(
+        model=MODEL,
+        contents="\n".join(conversation),
+        config={
+            "system_instruction": (
+                "You are a helpful AI Technical Support Agent. "
+                "Answer clearly and concisely. "
+                "Use Indonesian when the user speaks Indonesian."
+            )
+        },
+    )
+
+    return {"answer": response.text or "Tidak ada respons dari Gemini."}
+
+
+builder = StateGraph(AgentState)
+
+builder.add_node("generate_response", generate_response)
+builder.add_edge(START, "generate_response")
+builder.add_edge("generate_response", END)
+
+agent = builder.compile()
+
+
+def ask_agent(message: str, history: list[dict[str, str]]) -> str:
+    result = agent.invoke({
+        "history": history,
+        "user_message": message,
+        "answer": "",
+    })
+
+    return result["answer"]
