@@ -13,3 +13,9 @@ data/*
 *.log
 .pytest_cache/
 .coverage
+
+# Old virtual environment
+.venv-old/
+
+# Python cache
+**/__pycache__/

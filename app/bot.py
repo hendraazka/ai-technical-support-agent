@@ -3,11 +3,13 @@ import asyncio
 import logging
 import re
 
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpx2").setLevel(logging.WARNING)
 
+from app.security.masking import mask_sensitive_data
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import (
@@ -21,7 +23,6 @@ from telegram.ext import (
 )
 
 from app.agent import ask_agent
-from app.tools import format_system_status
 from app.tools import format_system_status, get_docker_status
 
 from app.memory import (
@@ -88,7 +89,7 @@ async def post_init(application: Application):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Hermes AI Support\n\n"
+        "AI Technical Support Agent\n\n"
         "/start - Mulai bot\n"
         "/help - Bantuan\n"
         "/clear - Hapus riwayat percakapan"
@@ -109,53 +110,81 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-
 async def handle_message(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
     chat_id = update.effective_chat.id
-    user_message = update.message.text
+    user_message = update.message.text or ""
 
-    history = chat_histories.setdefault(chat_id, [])
+    # 1. Masking pesan sebelum diproses atau dicatat
+    safe_message = mask_sensitive_data(user_message)
 
-    logger.info("Pesan diterima: %s", user_message[:100])
+    logger.info("Pesan diterima. Memulai analisis incident.")
 
     try:
         await update.message.chat.send_action("typing")
 
-        logger.info("Memanggil Gemini melalui LangGraph...")
+        # 2. Ambil conversation history dari SQLite
+        history = await asyncio.to_thread(
+            get_history,
+            chat_id,
+            10,
+        )
 
+        # 3. Pastikan history lama juga sudah dimasking
+        safe_history = [
+            {
+                "role": item["role"],
+                "content": mask_sensitive_data(item["content"]),
+            }
+            for item in history
+        ]
+
+        logger.info("Memanggil LangGraph Agent + RAG...")
+
+        # 4. Kirim hanya data yang sudah dimasking ke agent
         answer = await asyncio.to_thread(
             ask_agent,
-            user_message,
-            history,
+            safe_message,
+            safe_history,
         )
+
+        # 5. Masking kembali jawaban untuk mencegah secret tersimpan
+        safe_answer = mask_sensitive_data(answer)
 
         logger.info(
-            "Gemini selesai. Panjang jawaban: %d karakter",
-            len(answer),
+            "Analisis selesai. Panjang jawaban: %d karakter",
+            len(safe_answer),
         )
 
-        history.extend([
-            {"role": "user", "content": user_message},
-            {"role": "assistant", "content": answer},
-        ])
+        # 6. Simpan percakapan yang sudah dimasking ke SQLite
+        await asyncio.to_thread(
+            save_turn,
+            chat_id,
+            safe_message,
+            safe_answer,
+        )
 
-        chat_histories[chat_id] = history[-20:]
-
+        # 7. Kirim hasil ke Telegram
         logger.info("Mengirim jawaban ke Telegram...")
 
-        await update.message.reply_text(clean_response(answer))
+        await update.message.reply_text(
+            clean_response(safe_answer)
+        )
 
         logger.info("Jawaban berhasil dikirim ke Telegram.")
 
     except Exception:
-        logger.exception("Gagal memproses pesan dari Telegram")
+        logger.error(
+            "Gagal memproses pesan Telegram.",
+            exc_info=False,
+    )
 
         await update.message.reply_text(
-            "Agent gagal memproses permintaan. Silakan periksa log aplikasi."
-        )
+            "Agent gagal memproses permintaan. "
+            "Silakan periksa konfigurasi aplikasi."
+    )    
 
 
 async def status_command(
@@ -208,3 +237,6 @@ def clean_response(text: str) -> str:
     text = text.replace("```", "")
     text = text.replace("`", "")
     return text.strip()
+
+if __name__ == "__main__":
+    run_bot()
